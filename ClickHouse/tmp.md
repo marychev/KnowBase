@@ -7,8 +7,3 @@ tmp.md
 
 -------------------
 
-
-# Kafka Table Engine
-
-...
-
