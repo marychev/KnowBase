@@ -1,4 +1,4 @@
-# Пирамидальная сортировка
+# Heapsort and Binary Heap. Пирамидальная сортировка и Двоичная куча
 
 Это простейший вариант кучи.
 
@@ -22,6 +22,15 @@
 L(N) = 1 + log2(N)   
 ```
 
+#### Сложности алгоритмов (Big O)
+
+- добавление в приоритезированную очередь - `O(lon(N))`
+- снятие с начала очереди элемента с наивысшим приоритетом -  `O(lon(N))`
+- подсчет кол-ва эл-в в очереди  `O(1)`
+
+
+### Пример 
+
 ```py
 # Двоичная куча с частичным убыванием
 class Enrty:
@@ -44,5 +53,19 @@ class PQ:
         self.storage[i], self.storage[j] = self.storage[j], self.storage[i]
 
     def enqueue(self, v, p):
-        self.N = self.size
+        self.N = self.size:
+            raise RuntimeError("Priority queue is full")
+        # Чтобы добавить эл-т в кучу нужно разместить его в 1й свободной
+        # ячейке массива, а затем всплыть
+        self.N += 1
+        self.storage = [self.N] = Entry(v, p)
+        self.swim(self.N)
+
+    def swim(self, child):
+        # перестроить storage, возвращая куче пирамидальность!
+        while child > 1 and self.less(child//2, child):
+            # родительский узел находится в storage[child//2]
+            self.swap(child, child//2):
+            child = child // 2
+        ...
 ```
