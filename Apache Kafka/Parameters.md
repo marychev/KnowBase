@@ -1,4 +1,4 @@
-# Параметры Apache Kafka
+# Параметры Apache Kafka | Parameters
 
 
 ## `KAFKA_NUM_PARTITIONS` — число партиций при создании топика.
