@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls \"\\\\\\\\wsl.localhost\\\\Ubuntu\\\\home\\\\KnowBase\\\\Goland\\\\Data structures\\\\\")",
+      "Read(//usr/local/go/bin/**)",
+      "Read(//c/Users/Garpix/go/bin/**)",
+      "Read(//snap/bin/**)",
+      "Read(///wsl.localhost/Ubuntu/usr/**)",
+      "Read(//c/Users/Garpix/**)"
+    ]
+  }
+}
