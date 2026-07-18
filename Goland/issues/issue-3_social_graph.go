@@ -2,7 +2,10 @@
 
 package main
 
-import "fmt"
+import (
+    "fmt"
+    "sync"
+)
 
 type User struct {
     ID   int
@@ -10,6 +13,7 @@ type User struct {
 }
 
 type Graph struct {
+	mu          sync.RWMutex
 	users	  	map[int]*User
 	connections map[int]map[int]bool // connections[fromID][toID] = true
 	typed       map[int]map[int]Connection // typed[fromID][toID] = Connection
@@ -24,15 +28,22 @@ func NewGraph() *Graph {
 }
 
 func (g *Graph) AddUser(id int, name string) {
+    g.mu.Lock()
+    defer g.mu.Unlock()
     g.users[id] = &User{ID: id, Name: name}
 }
 
 func (g *Graph) GetUser(id int) (*User, bool) {
+    g.mu.RLock()
+    defer g.mu.RUnlock()
     user, ok := g.users[id]
     return user, ok
 }
 
 func (g *Graph) AddConnection(fromID, toID int) bool {
+    g.mu.Lock()
+    defer g.mu.Unlock()
+
     if _, ok := g.users[fromID]; !ok {
         return false
     }
@@ -47,6 +58,9 @@ func (g *Graph) AddConnection(fromID, toID int) bool {
 }
 
 func (g *Graph) GetConnections(userID int) []*User {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
 	var result []*User
 	for toID := range g.connections[userID] {
 		if user, ok := g.users[toID]; ok {
@@ -56,23 +70,40 @@ func (g *Graph) GetConnections(userID int) []*User {
 	return result
 }
 
-func (g *Graph) HasConnection(fromID, toID int) bool {
+// hasConnectionLocked — версия без блокировки. Вызывающий обязан держать g.mu.
+// Существует, чтобы IsMutual мог сделать две проверки под одним RLock, не устраивая
+// рекурсивный RLock (он у RWMutex запрещён).
+func (g *Graph) hasConnectionLocked(fromID, toID int) bool {
     return g.connections[fromID][toID]
 }
 
+func (g *Graph) HasConnection(fromID, toID int) bool {
+    g.mu.RLock()
+    defer g.mu.RUnlock()
+    return g.hasConnectionLocked(fromID, toID)
+}
+
 func (g *Graph) UserCount() int {
+    g.mu.RLock()
+    defer g.mu.RUnlock()
     return len(g.users)
 }
 
 func (g *Graph) RemoveConnection(fromID, toID int) bool {
+    g.mu.Lock()
+    defer g.mu.Unlock()
+
     had := g.connections[fromID][toID]
 	delete(g.connections[fromID], toID)
-	hadTyped := g.typed[fromID][toID]
+	_, hadTyped := g.typed[fromID][toID]
 	delete(g.typed[fromID], toID)
     return had || hadTyped
 }
 
 func (g *Graph) RemoveUser(id int) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
 	if _, ok := g.users[id]; !ok {
 		return false
 	}
@@ -92,14 +123,21 @@ func (g *Graph) RemoveUser(id int) bool {
 }
 
 func (g *Graph) IsMutual(id1, id2 int) bool {
-    return g.HasConnection(id1, id2) && g.HasConnection(id2, id1)
+    g.mu.RLock()
+    defer g.mu.RUnlock()
+    return g.hasConnectionLocked(id1, id2) && g.hasConnectionLocked(id2, id1)
 }
 
 func (g *Graph) ConnectionCount(userID int) int {
+    g.mu.RLock()
+    defer g.mu.RUnlock()
     return len(g.connections[userID])
 }
 
 func (g *Graph) CommonConnections(id1, id2 int) []*User {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
 	var result []*User
 	for toID := range g.connections[id1] {
 		if g.connections[id2][toID] {
@@ -112,6 +150,9 @@ func (g *Graph) CommonConnections(id1, id2 int) []*User {
 }
 
 func (g *Graph) SuggestConnections(userID int) []*User {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
 	direct := g.connections[userID]   // прямые друзья (nil-safe)
 	suggestions := make(map[int]bool) // set рекомендаций
 
@@ -133,6 +174,9 @@ func (g *Graph) SuggestConnections(userID int) []*User {
 }
 
 func (g *Graph) GetAllUsers() []*User {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
 	var result []*User
 	for _, user := range g.users {
 		result = append(result, user)
@@ -184,6 +228,9 @@ func (b Blocked) Weight() int {
 }
 
 func (g *Graph) AddTypedConnection(fromID, toID int, conn Connection) bool {
+    g.mu.Lock()
+    defer g.mu.Unlock()
+
     if _, ok := g.users[fromID]; !ok { return false }
 	if _, ok := g.users[toID]; !ok { return false }
 	if g.typed[fromID] == nil {
@@ -194,6 +241,9 @@ func (g *Graph) AddTypedConnection(fromID, toID int, conn Connection) bool {
 }
 
 func (g *Graph) GetConnectionsByType(userID int, connType string) []*User {
+    g.mu.RLock()
+    defer g.mu.RUnlock()
+
     var result []*User
 	for toID, conn := range g.typed[userID] {
 		if conn.Type() == connType {
@@ -206,6 +256,8 @@ func (g *Graph) GetConnectionsByType(userID int, connType string) []*User {
 }
 
 func (g *Graph) GetConnectionInfo(fromID, toID int) (Connection, bool) {
+    g.mu.RLock()
+    defer g.mu.RUnlock()
     conn, ok := g.typed[fromID][toID]
 	return conn, ok
 }
@@ -291,4 +343,30 @@ func main() {
 		// 2→3: type=blocked weight=-1
 	}
 
+	// go run -race issues/issue-3_social_graph.go
+	gr := NewGraph()
+	for i := 0; i < 20; i++ {
+		gr.AddUser(i, fmt.Sprintf("u%d", i))
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		from, to := i%20, (i+1)%20
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			gr.AddConnection(from, to)
+		}()
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			gr.HasConnection(from, to)
+			gr.IsMutual(from, to)
+			_ = gr.GetConnections(from)
+			_ = gr.UserCount()
+		}()
+	}
+	wg.Wait()
+	fmt.Println("race stress done, users:", gr.UserCount())
 }

@@ -21,6 +21,7 @@ package main
 import (
 	"fmt"
 	"slices"
+	"sync"
 )
 
 type CacheEntry struct {
@@ -28,6 +29,7 @@ type CacheEntry struct {
 }
 
 type LRUCache struct {
+	mu       sync.RWMutex
 	capacity int
 	data     map[string]*CacheEntry
 	order    []string // [0] — самый старый, [len-1] — самый недавний
@@ -49,13 +51,19 @@ func NewLRUCache(capacity int) *LRUCache {
 }
 
 // touch перемещает существующий ключ в конец order (самый недавний).
-// Инвариант: key уже присутствует в c.order.
+// Инварианты: key уже присутствует в c.order И вызывающий держит c.mu.Lock.
+// Свой лок touch не берёт намеренно — RWMutex не рекурсивен, повторный Lock
+// из-под уже захваченного лока привёл бы к deadlock.
 func (c *LRUCache) touch(key string) {
 	i := slices.Index(c.order, key)
 	c.order = append(slices.Delete(c.order, i, i+1), key)
 }
 
 func (c *LRUCache) Get(key string) (any, bool) {
+	// Lock, а не RLock: Get через touch мутирует order и меняет stats.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if entry, ok := c.data[key]; ok {
 		c.touch(key)
 		c.stats.Hits++
@@ -66,6 +74,9 @@ func (c *LRUCache) Get(key string) (any, bool) {
 }
 
 func (c *LRUCache) Put(key string, value any) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if entry, ok := c.data[key]; ok {
 		entry.Value = value
 		c.touch(key)
@@ -85,14 +96,21 @@ func (c *LRUCache) Put(key string, value any) {
 }
 
 func (c *LRUCache) Len() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return len(c.order)
 }
 
 func (c *LRUCache) Stats() CacheStats {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.stats
 }
 
 func (c *LRUCache) HitRate() float64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
 	total := c.stats.Hits + c.stats.Misses
 	if total == 0 {
 		return 0.0
@@ -101,15 +119,23 @@ func (c *LRUCache) HitRate() float64 {
 }
 
 func (c *LRUCache) Keys() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return slices.Clone(c.order)
 }
 
 func (c *LRUCache) Clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	clear(c.data)
 	c.order = c.order[:0]
 }
 
 func (c *LRUCache) Delete(key string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if _, ok := c.data[key]; !ok {
 		return false
 	}
@@ -120,6 +146,9 @@ func (c *LRUCache) Delete(key string) bool {
 }
 
 func (c *LRUCache) Contains(key string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
 	_, ok := c.data[key]
 	return ok
 }
@@ -128,6 +157,9 @@ func (c *LRUCache) Contains(key string) bool {
 // maps.Clone здесь не подходит: он даёт shallow-копию, где обе мапы указывали
 // бы на одни и те же *CacheEntry — мутация Value в клоне протекала бы в оригинал.
 func (c *LRUCache) Clone() *LRUCache {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
 	newCache := &LRUCache{
 		capacity: c.capacity,
 		data:     make(map[string]*CacheEntry, len(c.data)),
@@ -164,4 +196,24 @@ func main() {
 	fmt.Println(clone.Contains("z")) // true
 	fmt.Println(cache.Keys())        // без "z"
 	fmt.Println(clone.Keys())        // с "z"
+
+	// go run -race issues/issue-2_lru_cache-refactor.go
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		key := fmt.Sprintf("k%d", i%5)
+
+		wg.Add(1)
+		go func(v int) {
+			defer wg.Done()
+			cache.Put(key, v)
+		}(i)
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cache.Get(key)
+			_ = cache.Stats()
+		}()
+	}
+	wg.Wait()
 }

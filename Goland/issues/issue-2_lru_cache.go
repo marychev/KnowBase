@@ -4,7 +4,10 @@
 
 package main
 
-import "fmt"
+import (
+    "fmt"
+    "sync"
+)
 
 type CacheEntry struct {
     Key   string
@@ -12,6 +15,7 @@ type CacheEntry struct {
 }
 
 type LRUCache struct {
+    mu       sync.RWMutex
     capacity int
     data     map[string]*CacheEntry
     order    []string   // [0] — самый старый, [len-1] — самый недавний
@@ -35,6 +39,10 @@ func NewLRUCache(capacity int) *LRUCache {
 }
 
 func (c *LRUCache) Get(key string) (interface{}, bool) {
+    // Lock, а не RLock: Get мутирует order (двигает ключ в конец) и stats.
+    c.mu.Lock()
+    defer c.mu.Unlock()
+
     if entry, ok := c.data[key]; ok {
         for i, k := range c.order {
             if k == key {
@@ -50,6 +58,9 @@ func (c *LRUCache) Get(key string) (interface{}, bool) {
 }
 
 func (c *LRUCache) Put(key string, value interface{}) {
+    c.mu.Lock()
+    defer c.mu.Unlock()
+
     if entry, ok := c.data[key]; ok {
         entry.Value = value
         for i, k := range c.order {
@@ -72,14 +83,21 @@ func (c *LRUCache) Put(key string, value interface{}) {
 }
 
 func (c *LRUCache) Len() int {
+    c.mu.RLock()
+    defer c.mu.RUnlock()
     return len(c.order)
 }
 
 func (c *LRUCache) Stats() CacheStats {
+    c.mu.RLock()
+    defer c.mu.RUnlock()
     return c.stats
 }
 
 func (c *LRUCache) HitRate() float64 {
+    c.mu.RLock()
+    defer c.mu.RUnlock()
+
     total := c.stats.Hits + c.stats.Misses
     if total == 0 {
         return 0.0
@@ -88,15 +106,23 @@ func (c *LRUCache) HitRate() float64 {
 }
 
 func (c *LRUCache) Keys() []string {
+    c.mu.RLock()
+    defer c.mu.RUnlock()
     return append([]string(nil), c.order...)
 }
 
 func (c *LRUCache) Clear() {
+    c.mu.Lock()
+    defer c.mu.Unlock()
+
     c.data = make(map[string]*CacheEntry)
     c.order = c.order[:0]
 }
 
 func (c *LRUCache) Delete(key string) bool {
+    c.mu.Lock()
+    defer c.mu.Unlock()
+
     if _, ok := c.data[key]; ok {
         delete(c.data, key)
         for i, k := range c.order {
@@ -110,11 +136,17 @@ func (c *LRUCache) Delete(key string) bool {
 }
 
 func (c *LRUCache) Contains(key string) bool {
+    c.mu.RLock()
+    defer c.mu.RUnlock()
+
     _, ok := c.data[key]
     return ok
 }
 
 func (c *LRUCache) Clone() *LRUCache {
+    c.mu.RLock()
+    defer c.mu.RUnlock()
+
     newCache := &LRUCache{
         capacity: c.capacity,
         data:     make(map[string]*CacheEntry, len(c.data)),
@@ -153,5 +185,24 @@ func main() {
     fmt.Println(cache.Keys())          // без "z"
     fmt.Println(clone.Keys())          // с "z"
 
+    // go run -race issues/issue-2_lru_cache.go
+    // Мешаем writer'ов (Put) и reader'ов (Get/Stats) в куче горутин.
+    var wg sync.WaitGroup
+    for i := 0; i < 100; i++ {
+        key := fmt.Sprintf("k%d", i%5)
 
+        wg.Add(1)
+        go func(v int) {
+            defer wg.Done()
+            cache.Put(key, v)
+        }(i)
+
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            cache.Get(key)
+            _ = cache.Stats()
+        }()
+    }
+    wg.Wait()
 }
