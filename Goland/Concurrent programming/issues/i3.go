@@ -112,3 +112,69 @@ func main() {
 	fmt.Println("Программа завершена.")
 }
 
+
+// II Solution
+
+func worker2(id int, jobs <-chan int, stopCh <-chan struct{}, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	for {
+		select{
+		case <-stopCh:
+			fmt.Printf("Worker %d get 'stopCH'!", id)
+			return
+
+		case job, ok := <-jobs:
+			if !ok {
+				return
+			}
+			
+			done := make(chan struct{})
+			go func() {
+				time.Sleep(500 * time.Millisecond)
+				close(done)
+			}()
+
+			select{
+			case <-done:
+				fmt.Printf("Worker %d done job %d\n", id, job)
+			case <-time.After(1 * time.Second):
+				fmt.Printf("считаем, что задание %d не успело ", job)
+			}
+			case <-stopCh:
+				fmt.Printf("Worker %d get 'stopCH'!", id)
+				return
+
+		}
+	}
+}
+
+
+func main2() {
+	jobs := make(chan int, 10)
+	stopCh := make(chan struct{})
+
+	// Запускает воркера(ов)
+	var wg sync.WaitGroup
+	numWorkers := 1
+	for w := 1; w <= numWorkers; w++ {
+		wg.Add(1)
+		go worker2(w, jobs, stopCh, &wg)
+	}
+
+	// Отправляет несколько заданий
+	numJobs := 5
+	for j := 1; j <= numJobs; j++ {
+		jobs <- j
+	}
+	close(jobs)
+	fmt.Println("All jobs send! Chanal 'jobs' closed")
+
+	// Через некоторое время посылает stop (закрывает stopCh)
+	time.Sleep(2 * time.Second)
+	close(stopCh)
+
+	// Корректно завершает программу
+	wg.Wait()
+	fmt.Println("Program has finished")
+}
