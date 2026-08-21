@@ -8,7 +8,12 @@
       "Read(///wsl.localhost/Ubuntu/usr/**)",
       "Read(//c/Users/Garpix/**)",
       "Bash(ls \"//wsl.localhost/Ubuntu/home/KnowBase/Goland/Data structures/\")",
-      "Read(///wsl.localhost/Ubuntu/home/KnowBase/Goland/**)"
+      "Read(///wsl.localhost/Ubuntu/home/KnowBase/Goland/**)",
+      "Bash(go run *)",
+      "Bash(wsl -e bash -lc 'cd \"/home/KnowBase/Goland/Concurrent programming/issues\" && go run -race i2.go')",
+      "Bash(wsl -e bash -lc 'cd \"/home/KnowBase/Goland\" && git status && echo \"=====DIFF=====\" && git diff HEAD -- \"Concurrent programming/issues/\"')",
+      "Bash(go vet *)",
+      "Bash(wsl -d Ubuntu bash -lc 'cd \"/home/KnowBase/Goland/Concurrent programming/issues\" && go run ./i3.go')"
     ]
   }
 }
