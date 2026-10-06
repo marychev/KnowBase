@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(command -v go)",
+      "Read(//usr/local/**)",
+      "Read(//c/Users/Garpix/**)",
+      "Bash(find / -name 'go' -type f -path '*bin*' 2>/dev/null | head; echo \"---snap---\"; ls /snap/go/current/bin 2>/dev/null)",
+      "Read(///wsl.localhost/Ubuntu//**)",
+      "Read(//snap/go/current/**)",
+      "Bash(wsl.exe -d Ubuntu -- bash -lc 'cd \"/home/KnowBase/Goland/Concurrent programming/issues\" && go vet i_main.go && echo \"vet: OK\" && go run i_main.go')"
+    ]
+  }
+}

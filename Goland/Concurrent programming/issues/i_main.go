@@ -40,6 +40,7 @@ import (
 	"math/rand"
 	"sync"
 	"time"
+	"runtime"
 )
 
 // UserData — общая структура, куда собираем ответы трёх сервисов (fan-in).
@@ -216,4 +217,6 @@ func main() {
 	}
 
 	log.Println("main завершает работу.")
+	fmt.Println("горутин в программе:", runtime.NumGoroutine())
+
 }
