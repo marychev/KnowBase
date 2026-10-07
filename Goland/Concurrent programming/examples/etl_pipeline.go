@@ -1,6 +1,5 @@
 // etl_pipeline.go
 //
-//
 //   genWeb   ─ normalize ─┐
 //                         ├─ merge (fan-in) ─ Event ── batch(size + timeout) ─ consume
 //   genApp   ─ normalize ─┘
@@ -15,6 +14,7 @@ import (
 	"time"
 	"fmt"
 	"runtime"
+	"sync"
 )
 
 // --- Структуры источников: разная форма, близкий смысл ---
@@ -40,18 +40,20 @@ type Event struct {
 	At     time.Time
 }
 
-func createWebEvent(sessionID string, url string) WebEvent {
+type CreateEventCallback[T any] func(i int) T
+
+func createWebEvent(i int) WebEvent {
 	return WebEvent{
-		SessionID: sessionID,
-		URL:       url,
+		SessionID: "web-" + strconv.Itoa(i),
+		URL:       "/p/" + strconv.Itoa(rand.Intn(5)),
 		TS:        time.Now().Unix(),
 	}
 }
 
-func createAppEvent(deviceID string, screen string) AppEvent {
+func createAppEvent(i int) AppEvent {
 	return AppEvent{
-		DeviceID:  deviceID,
-		Screen:    screen,
+		DeviceID:  "dev-" + strconv.Itoa(i),
+		Screen:    "screen_" + strconv.Itoa(rand.Intn(5)),
 		EventTime: time.Now(),
 	}
 }
@@ -79,16 +81,17 @@ func appEventPrint(e AppEvent) {
 
 /*
 шаблон генератора данных (паттерн Generator) с использованием каналов и горутин. 
-Функция genWeb асинхронно генерирует поток случайных событий веб-сайта (WebEvent) 
+Функция genWeb AND genApp асинхронно генерирует поток случайных событий веб-сайта (WebEvent) 
 с заданным интервалом и корректно завершает работу при отмене контекста, 
 предотвращая утечки памяти.
 <-chan WebEvent: Возвращает канал только для чтения (receive-only channel). 
 Вызывающий код сможет только читать из него события, 
 но не сможет случайно закрыть его или отправить туда что-то лишнее.
 */
-func genWeb(ctx context.Context, every time.Duration) <-chan WebEvent {
+
+func _genEvents[T any](ctx context.Context, every time.Duration, createEvent CreateEventCallback[T]) <-chan T {
 	// Создается небуферизированный канал.
-	out := make(chan WebEvent)
+	out := make(chan T)
 	
 	// Запускается новая горутина. Сама функция genWeb не ждет выполнения этого кода, 
 	// она моментально возвращает канал out и завершается.	
@@ -114,7 +117,7 @@ func genWeb(ctx context.Context, every time.Duration) <-chan WebEvent {
 			case <-t.C:
 				// Срабатывает каждый раз, когда подходит время (заданный интервал every)
 				i++
-				ev := createWebEvent("web-" + strconv.Itoa(i), "/p/" + strconv.Itoa(rand.Intn(5)))
+				ev := createEvent(i)
 
 				// Защита от блокировки при отправке (Важный нюанс!)
 				// Отправку тоже прикрываем ctx, иначе на отмене
@@ -131,30 +134,6 @@ func genWeb(ctx context.Context, every time.Duration) <-chan WebEvent {
 	return out
 }
 
-func genApp(ctx context.Context, every time.Duration) <-chan AppEvent {
-	out := make(chan AppEvent)
-	go func() {
-		defer close(out)
-		t := time.NewTicker(every)
-		defer t.Stop()
-		i := 0
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				i++
-				ev := createAppEvent("dev-" + strconv.Itoa(i), "screen_" + strconv.Itoa(rand.Intn(5)))
-				select {
-				case out <- ev:
-				case <-ctx.Done():
-					return
-				}
-			}
-		}
-	}()
-	return out
-}
 
 func consume(in <-chan []Event) {
 	n := 0
@@ -179,26 +158,55 @@ func main() {
 	// Создаем контекст с таймаутом на 5 секунд.
 	// По истечении этого времени ctx.Done() закроется автоматически
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	
+
 	// всегда вызывать cancel() для освобождения ресурсов контекста
 	defer cancel()
 
 	fmt.Println("Запуск генератора событий (работает 5 секунд)...")
 
 	every := 500 * time.Millisecond
-	webEventsChan := genWeb(ctx, every)
-	appEventsChan := genApp(ctx, every)
 
-	// Читаем из канала. Цикл сам завершится, когда канал закроется.
-	// Канал закроется благодаря defer close(out) внутри genWeb при отмене контекста.
-	for event := range webEventsChan {
-		webEventPrint(event)
-	}
+	webEventsCh := _genEvents(ctx, every, createWebEvent)
+	appEventsCh := _genEvents(ctx, every, createAppEvent)
 
-	// TODO: Этот код не выводится. Если закоментировать genWeb, то выводится только appEventPrint.
-	for event := range appEventsChan {
-		appEventPrint(event)
-	}
+	// Вычитывание данных (остается параллельным через WaitGroup)
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func(){
+		defer wg.Done()
+		for ev := range webEventsCh {
+			webEventPrint(ev)
+		}	
+	}()
+	
+	go func(){
+		defer wg.Done()
+		for ev := range appEventsCh {
+			appEventPrint(ev)
+		}	
+	}()
+
+	wg.Wait()
+
+	// // Создаем канал для нормализованных событий
+	// normalizedEventsCh := make(chan Event)
+
+	// // Запускаем горутину для нормализации событий из webEventsCh
+	// go func() {
+	// 	defer close(normalizedEventsCh)
+	// 	for ev := range webEventsCh {
+	// 		normalizedEventsCh <- Event{
+	// 			Source: "web",
+	// 			UserID: ev.SessionID,
+	// 			Action: ev.URL,
+	// 			At:     time.Unix(ev.TS, 0),
+	// 		}
+	// 	}
+	// }()
+
+	// // Запускаем горутину для нормализации событий из appEventsCh
+	// // Todo ...
 
 	fmt.Println("горутин в программе:", runtime.NumGoroutine())
 }

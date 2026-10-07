@@ -1,4 +1,4 @@
-// ../Concurrent programming/issues# go run -race i_main.go
+// cd Goland/Concurrent\ programming/examples && go run -race i_ex.go
 package main
 
 import (
