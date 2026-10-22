@@ -219,7 +219,8 @@ func consume(in <-chan []Event) {
 	log.Printf("готово, всего батчей: %d", n)
 }
 
-func batch(ctx context.Context, in <-chan Event, maxSize int, timeout time.Duration) <-chan []Event {
+/*
+func batchWithContex(ctx context.Context, in <-chan Event, maxSize int, timeout time.Duration) <-chan []Event {
 	out := make(chan []Event)
 
 	go func() {
@@ -283,27 +284,86 @@ func batch(ctx context.Context, in <-chan Event, maxSize int, timeout time.Durat
 
 	return out
 }
+*/
+
+func batch(in <-chan Event, maxSize int, timeout time.Duration) <-chan []Event {
+	out := make(chan []Event)
+
+	go func() {
+		defer close(out)
+
+		buf := make([]Event, 0, maxSize)
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+
+		_flush := func() {
+			if len(buf) == 0 {
+				return
+			}
+			out <- buf
+			buf = make([]Event, 0, maxSize)
+		}
+
+		for {
+			select {
+			case <-timer.C:
+				_flush()
+				timer.Reset(timeout)
+			case ev, ok := <-in:
+				if !ok {
+					_flush()
+					return
+				}
+
+				buf = append(buf, ev)
+				if len(buf) == maxSize {
+					_flush()
+
+					// это сброс таймера при досрочном заполнении пачки
+					// (когда сработал лимит по maxSize, а не по времени).
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						// пытается забрать значение из канала. Если оно там было — мы его «сжигаем».
+						// Если канала пуст — default спасает нас от зависания.
+						default:
+						}
+					}
+					timer.Reset(timeout)
+				}
+			}
+		}
+	}()
+
+	return out
+}
+
+func RunPipeline(ctx context.Context, web <-chan WebEvent, app <-chan AppEvent, maxSize int, timeout time.Duration) <-chan []Event {
+	webNorm := normalizeWeb(ctx, web)
+	appNorm := normalizeApp(ctx, app)
+	merged := merge(ctx, webNorm, appNorm)
+	return batch(merged, maxSize, timeout)
+}
 
 func main() {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	// ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// defer cancel()
 
-	webGenCh := genWeb(ctx, 400*time.Millisecond)
-	appGenCh := genApp(ctx, 500*time.Millisecond)
+	// webGenCh := genWeb(ctx, 400*time.Millisecond)
+	// appGenCh := genApp(ctx, 500*time.Millisecond)
 
-	webNormCh := normalizeWeb(ctx, webGenCh)
-	appNormCh := normalizeApp(ctx, appGenCh)
-	mergeCh := merge(ctx, webNormCh, appNormCh)
+	// webNormCh := normalizeWeb(ctx, webGenCh)
+	// appNormCh := normalizeApp(ctx, appGenCh)
+	// mergeCh := merge(ctx, webNormCh, appNormCh)
 
-	batches := batch(ctx, mergeCh, 5, 1*time.Second)
-	consume(batches)
+	// batches := batch(ctx, mergeCh, 5, 1*time.Second)
+	// consume(batches)
 
-	// for batch := range batches {
-	// 	fmt.Printf("Получена пачка из %d элементов:\n", len(batch))
-	// 	for _, ev := range batch {
-	// 		fmt.Printf("[%s]: %s | %s | %s\n",
-	// 			ev.Source, ev.UserID, ev.Action, ev.At.Format("15:04:05"))
-
-	// 	}
-	// }
+	// // for batch := range batches {
+	// // 	fmt.Printf("Получена пачка из %d элементов:\n", len(batch))
+	// // 	for _, ev := range batch {
+	// // 		fmt.Printf("[%s]: %s | %s | %s\n",
+	// // 			ev.Source, ev.UserID, ev.Action, ev.At.Format("15:04:05"))
+	// // 	}
+	// // }
 }

@@ -280,3 +280,7 @@ func TestRunPipeline_CancelShutsDownCleanly(t *testing.T) {
 		t.Fatal("pipeline не завершился после отмены ctx (возможна утечка горутины)")
 	}
 }
+
+// RUN
+// go mod init pipeline
+// cd KnowBase/Goland/Concurrent programming/examples/etl_pipeline && go test -v
