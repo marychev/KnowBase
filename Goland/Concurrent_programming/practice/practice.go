@@ -37,8 +37,15 @@ type Job struct {
 }
 
 type Result struct {
-	JobID int
-	Value int
+	JobID    int
+	WorkerID int
+	Value    string
+}
+
+type Stats struct {
+	panics            int
+	failed            int
+	WorkerJobsSuccess map[int]int // map[WorkerID]int
 }
 
 func callExternalService(ctx context.Context, j Job) (int, error) {
@@ -61,64 +68,94 @@ func callExternalService(ctx context.Context, j Job) (int, error) {
 	}
 }
 
-func worker(ctx context.Context, wid int, jobs <-chan Job, result chan<- Result, wg *sync.WaitGroup) {
-	// воркеров читают из `jobs`, (init and waiting)
-	// обрабатывают через `callExternalService`,
-	// пишут `Result` в канал `results`.
-	defer func() {
-		if r := recover(); r != nil {
-			fmt.Printf("[*_*]воркер #%d упал: %v", wid, r)
-			return
-		}
+func RunWorkerPool(ctx context.Context, jobs []Job, numWorkers int) []Result {
+	numJobs := len(jobs)
+	jobsCh := make(chan Job, numJobs)
+	resultsCh := make(chan Result, numJobs)
+
+	wg := &sync.WaitGroup{}
+
+	for w := 1; w <= numWorkers; w++ {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+			fmt.Printf("Worker #%d starting (jobs=%d)\n", w, len(jobsCh))
+
+			for {
+				select {
+				case <-ctx.Done():
+					fmt.Printf("Worker #%d finihed by Context signal\n", w)
+					return
+				case job, ok := <-jobsCh:
+					if !ok {
+						fmt.Printf("Worker #%d finihed so close jobs chanal\n", w)
+						return
+					}
+					i, err := callExternalService(ctx, job)
+					fmt.Println(" call:", i, err)
+
+					value := fmt.Sprintf("processed jod: %v", job)
+					if i == 0 {
+						value = err.Error()
+					}
+
+					select {
+					case <-ctx.Done():
+						fmt.Println("Safe send result finihed by Context signal")
+						return
+					case resultsCh <- Result{JobID: job.ID, WorkerID: w, Value: value}:
+					}
+				}
+			}
+		}()
+	}
+
+	for j := 1; j <= numJobs; j++ {
+		jobsCh <- Job{ID: j}
+	}
+	close(jobsCh)
+
+	go func() {
+		wg.Wait()
+		close(resultsCh)
 	}()
 
-	defer wg.Done()
-	fmt.Printf("Воркер #%d запущен\n", wid)
-
-	for j := range jobs {
-		fmt.Printf("... воркер #%d читает job  %d\n", wid, j)
-
-		resultCall, callErr := callExternalService(ctx, j)
-		fmt.Printf("-> callExternalService вернул результат #%d пишет Result '%s'\n", resultCall, callErr)
-
-		value := j.ID * 10
-		result <- Result{JobID: j.ID, Value: value}
-		fmt.Printf("-> воркер #%d пишет Value: %s\n", wid, value)
+	var total []Result
+	for r := range resultsCh {
+		total = append(total, r)
 	}
+
+	return total
 }
 
 func main() {
 	const (
-		numJobs    = 5
+		numJobs    = 3
 		numWorkers = 2
 	)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(5 * time.Second)
+		cancel()
+	}()
 
-	jobsCh := make(chan Job)
-	resultCh := make(chan Result, numJobs)
-	var wg sync.WaitGroup
-
-	for w := 1; w <= numWorkers; w++ {
-		wg.Add(1)
-		go worker(ctx, w, jobsCh, resultCh, &wg)
+	// Проверяем, почему завершилась обработка
+	if ctx.Err() == context.DeadlineExceeded {
+		fmt.Println("\n⚠️ Обработка была прервана по таймауту!")
 	}
 
-	// Генератор (producer) кладёт `N` заданий (`Job{ID: 1..N}`) в канал `jobs`.
+	var jobs []Job
 	for j := 1; j <= numJobs; j++ {
-		fmt.Printf("-> Отправляем задание %d\n", j)
-		jobsCh <- Job{ID: j}
+		jobs = append(jobs, Job{ID: j})
 	}
-	close(jobsCh)
-	fmt.Println("Все задания отправлены, канал jobs закрыт.")
 
-	for r := 1; r <= numJobs; r++ {
-		result := <-resultCh
-		fmt.Printf("<- Получен результат: %d\n", result)
+	total := RunWorkerPool(ctx, jobs, numWorkers)
+	fmt.Printf("Total results: %d\n", len(total))
+	for _, r := range total {
+		fmt.Printf(" result: %+v\n", r)
 	}
-	// close(resultCh)
 
-	wg.Wait()
-	fmt.Println("Все задачи успешно обработаны.")
+	fmt.Println("[end] Finished app!")
 }
