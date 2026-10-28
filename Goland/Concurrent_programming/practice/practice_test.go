@@ -5,6 +5,7 @@
 // go test -v -run TestRunWorkerPool_ContextCancellation
 // go test -v -run TestRunWorkerPool_DrainAllJobs
 // go test -v -race -run TestRunWorkerPool_StatsCollection
+// go test -v -run TestRunWorkerPool_SemaphoreLimit
 //
 
 package main
@@ -35,7 +36,7 @@ func TestWorkerPool_PanicRecovery(t *testing.T) {
 
 	// Если внутри RunWorkerPool нет recover(), этот тест КРАШНЕТ всё выполнение го-тестов.
 	// Если recover() есть, тест завершится успешно.
-	results := RunWorkerPool(ctx, jobs, numWorkers)
+	results, _ := RunWorkerPool(ctx, jobs, numWorkers)
 	t.Logf("RunWorkerPool успешно завершил работу. Результатов: %d (из %d)!", len(results), numJobs)
 
 	if len(results) != numJobs {
@@ -65,7 +66,7 @@ func TestRunWorkerPool_ContextCancellation(t *testing.T) {
 	resChs := make(chan []Result)
 
 	go func() {
-		res := RunWorkerPool(ctx, jobs, numWorkers)
+		res, _ := RunWorkerPool(ctx, jobs, numWorkers)
 		fmt.Println(len(res), " resChs ---> ")
 
 		resChs <- res
@@ -124,7 +125,7 @@ func TestRunWorkerPool_DrainAllJobs(t *testing.T) {
 	numWorkers := 2
 	jobs := prepareJobs(numJobs)
 
-	results := RunWorkerPool(ctx, jobs, numWorkers)
+	results, _ := RunWorkerPool(ctx, jobs, numWorkers)
 
 	if len(results) != numJobs {
 		t.Fatalf("Ожидали ровно %d результатов, а полуили %d", numJobs, len(results))
@@ -199,3 +200,43 @@ func TestRunWorkerPool_StatsCollection(t *testing.T) {
 
 	t.Logf("Метрики успешно проверены! Паник: %d, Ошибок: %d", stats.panics, stats.failed)
 }
+
+// TODO
+/*
+
+// Тест проверяет, что пул воркеров не выполняет больше K одновременных вызовов сервиса
+func TestRunWorkerPool_SemaphoreLimit(t *testing.T) {
+	ctx := context.Background()
+	numJobs := 10
+	numWorkers := 4 // Воркеров много
+
+	// В функцию RunWorkerPool нам нужно будет передать лимит K.
+	// Допустим, внешний сервис держит максимум K=2 одновременных вызовов.
+	maxConcurrencyK := 2
+
+	// Запускаем пул. Нам нужно будет изменить сигнатуру RunWorkerPool,
+	// чтобы она принимала maxConcurrencyK в качестве аргумента.
+	// Мы берем достаточное количество задач, чтобы все воркеры хотели работать одновременно.
+	jobs := prepareJobs(numJobs)
+
+	// В текущей реализации callExternalService мы не можем легко посчитать пик из теста,
+	// но мы можем проверить это, когда добавим семафор в код.
+	// Давай пока напишем структуру теста, который ожидает успешного выполнения с новым параметром.
+	results, stats := RunWorkerPoolWithSemaphore(ctx, jobs, numWorkers, maxConcurrencyK)
+
+	if len(results) != numJobs {
+		t.Fatalf("Ожидали %d результатов, получили %d", numJobs, len(results))
+	}
+
+	totalTracked := stats.panics + stats.failed
+	for _, count := range stats.WorkerJobsSuccess {
+		totalTracked += count
+	}
+
+	if totalTracked != numJobs {
+		t.Errorf("Статистика сошлась неверно: %d из %d", totalTracked, numJobs)
+	}
+
+	t.Logf("Тест пройден! Пул успешно отработал с ограничением семафора K=%d", maxConcurrencyK)
+
+*/
