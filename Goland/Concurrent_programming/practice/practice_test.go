@@ -1,18 +1,8 @@
-// Goland/Concurrent_programming/practice/practice_test.go
-// go test -race
-// go test -v -run TestRunWorkerPool_PanicRecovery
-// go test -v .
-// go test -v -run TestRunWorkerPool_ContextCancellation
-// go test -v -run TestRunWorkerPool_DrainAllJobs
-// go test -v -race -run TestRunWorkerPool_StatsCollection
-// go test -v -run TestRunWorkerPool_SemaphoreLimit
-//
-
 package main
 
 import (
 	"context"
-	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -36,7 +26,7 @@ func TestWorkerPool_PanicRecovery(t *testing.T) {
 
 	// Если внутри RunWorkerPool нет recover(), этот тест КРАШНЕТ всё выполнение го-тестов.
 	// Если recover() есть, тест завершится успешно.
-	results, _ := RunWorkerPool(ctx, jobs, numWorkers)
+	results, _ := RunWorkerPoolWithSemaphore(ctx, jobs, numWorkers, numWorkers)
 	t.Logf("RunWorkerPool успешно завершил работу. Результатов: %d (из %d)!", len(results), numJobs)
 
 	if len(results) != numJobs {
@@ -66,11 +56,8 @@ func TestRunWorkerPool_ContextCancellation(t *testing.T) {
 	resChs := make(chan []Result)
 
 	go func() {
-		res, _ := RunWorkerPool(ctx, jobs, numWorkers)
-		fmt.Println(len(res), " resChs ---> ")
-
+		res, _ := RunWorkerPoolWithSemaphore(ctx, jobs, numWorkers, numWorkers)
 		resChs <- res
-		fmt.Println(len(res), "<--- resChs ")
 	}()
 
 	time.Sleep(10 * time.Millisecond)
@@ -116,16 +103,17 @@ func TestRunWorkerPool_ContextCancellation(t *testing.T) {
 
 Тест проверит, что при штатной работе без отмены контекста все горутины завершаются,
 и мы получаем ровно столько результатов, сколько было задач.
+
+Тест проверяет, что пул корректно вычитывает ВСЕ задачи до конца
+и полностью освобождает ресурсы (закрывает горутины) после завершения работы.
 */
-// Тест проверяет, что пул корректно вычитывает ВСЕ задачи до конца
-// и полностью освобождает ресурсы (закрывает горутины) после завершения работы.
 func TestRunWorkerPool_DrainAllJobs(t *testing.T) {
 	ctx := context.Background()
 	numJobs := 5
 	numWorkers := 2
 	jobs := prepareJobs(numJobs)
 
-	results, _ := RunWorkerPool(ctx, jobs, numWorkers)
+	results, _ := RunWorkerPoolWithSemaphore(ctx, jobs, numWorkers, numWorkers)
 
 	if len(results) != numJobs {
 		t.Fatalf("Ожидали ровно %d результатов, а полуили %d", numJobs, len(results))
@@ -164,7 +152,7 @@ func TestRunWorkerPool_StatsCollection(t *testing.T) {
 	numWorkers := 3
 	Job := prepareJobs(numJobs)
 
-	results, stats := RunWorkerPool(ctx, Job, numWorkers)
+	results, stats := RunWorkerPoolWithSemaphore(ctx, Job, numWorkers, numWorkers)
 
 	var actualPanics int
 	var actualFailed int
@@ -201,16 +189,11 @@ func TestRunWorkerPool_StatsCollection(t *testing.T) {
 	t.Logf("Метрики успешно проверены! Паник: %d, Ошибок: %d", stats.panics, stats.failed)
 }
 
-// TODO
-/*
-
 // Тест проверяет, что пул воркеров не выполняет больше K одновременных вызовов сервиса
 func TestRunWorkerPool_SemaphoreLimit(t *testing.T) {
 	ctx := context.Background()
 	numJobs := 10
 	numWorkers := 4 // Воркеров много
-
-	// В функцию RunWorkerPool нам нужно будет передать лимит K.
 	// Допустим, внешний сервис держит максимум K=2 одновременных вызовов.
 	maxConcurrencyK := 2
 
@@ -238,5 +221,96 @@ func TestRunWorkerPool_SemaphoreLimit(t *testing.T) {
 	}
 
 	t.Logf("Тест пройден! Пул успешно отработал с ограничением семафора K=%d", maxConcurrencyK)
+}
 
+// Тест проверяет, что воркеры не утекают и не зависают на семафоре при отмене контекста
+func TestRunWorkerPool_ContextLeakSafety(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	numJobs, numWorkers := 50, 4
+	maxConcurrecyK := 1 //Специально зажимаем семафор до 1 вызова
+	jobs := prepareJobs(numJobs)
+
+	// Замеряем базовое количество горутин перед тестом
+	// Очищаем мусор для точности замера
+	runtime.GC()
+	baseGoroutines := runtime.NumGoroutine()
+
+	// Запускаем наш пул в горутине, так как если он зависнет, мы хотим, чтобы тест пошел дальше
+	doneCh := make(chan struct{})
+	go func() {
+		RunWorkerPoolWithSemaphore(ctx, jobs, numWorkers, maxConcurrecyK)
+		close(doneCh)
+	}()
+
+	// Ждем завершения работы пула с запасом времени
+	select {
+	case <-doneCh: // Пул успешно вышел из работы
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("DEADLOCK! Пул воркеров завис и не завершил работу после отмены контекста")
+	}
+
+	// Даем рантайму немного времени завершить все фоновые процессы горутин и меряем остаток
+	time.Sleep(20 * time.Millisecond)
+	runtime.GC()
+	endGoroutines := runtime.NumGoroutine()
+
+	// Если воркеры зависли внутри семафора, endGoroutines будет равен baseGoroutines + 4 (numWorkers)
+	if endGoroutines > baseGoroutines+1 { // +1 на случай внутренних шумов рантайма
+		t.Errorf("Обнаружена утечка горутин! До теста: %d, После: %d. Воркеры зависли.", baseGoroutines, endGoroutines)
+	} else {
+		t.Logf("Успех! Все горутины воркеров успешно завершились. Было: %d, Стало: %d", baseGoroutines, endGoroutines)
+	}
+}
+
+/*
+тест на Graceful Shutdown
+Чтобы проверить, что воркеры действительно дают текущим задачам завершиться после сигнала отмены.
+Мы сымитируем сигнал отмены прямо во время выполнения задач и проверим,
+что задачи, запущенные до отмены, вернули полноценный результат, а не оборвались на полуслове.
+
+TestRunWorkerPool_GracefulShutdown проверяет, что при отмене контекста
+задачи, которые УЖЕ начали выполняться, дорабатывают до конца.
 */
+func TestRunWorkerPool_GracefulShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	numJobs := 4
+	numWorkers := 4
+	maxConcurrencyK := 4
+	jobs := prepareJobs(numJobs)
+
+	// Запускаем пул
+	doneCh := make(chan []Result)
+	go func() {
+		res, _ := RunWorkerPoolWithSemaphore(ctx, jobs, numWorkers, maxConcurrencyK)
+		doneCh <- res
+	}()
+
+	// Даем воркерам буквально 10-20 мс, чтобы они ВСЕ успели зайти в callExternalService
+	// (так как задачи длятся 50-300мс, они гарантированно будут находиться внутри сервиса)
+	time.Sleep(15 * time.Millisecond)
+
+	// Имитируем приход системного сигнала (отменяем контекст)
+	cancel()
+
+	var results []Result
+	select {
+	case results = <-doneCh:
+		// Пул успешно завершился
+	case <-time.After(1 * time.Second):
+		t.Fatalf("DEADLOCK! Пул завис при попытке плавного завершения")
+	}
+
+	// Проверяем результаты. Так как воркеры зашли в метод ДО отмены контекста,
+	// они обязаны были дождаться ответа от callExternalService.
+	// Если мы увидим в Value текст ошибки контекста "context canceled", значит graceful shutdown не сработал
+	for _, res := range results {
+		if res.Value == "context canceled" {
+			t.Errorf("Задача %d была грубо оборвана контекстом, вместо плавного завершения!", res.JobID)
+		}
+	}
+
+	t.Logf("Плавное завершение сработало! Обработано начатых задач: %d", len(results))
+}
